@@ -93,7 +93,7 @@ class AgentLoop(
                 emit(AgentStep.Failed("Model call failed: ${e.message}"))
                 return@flow
             }
-            val text = choice.message.contentText()
+            val text = stripThinking(choice.message.contentText())
             emit(AgentStep.Thinking(text))
             emit(AgentStep.Done(text.ifEmpty { "Task complete" }))
             return@flow
