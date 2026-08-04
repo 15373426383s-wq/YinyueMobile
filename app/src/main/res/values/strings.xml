@@ -1,0 +1,8 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">银月</string>
+    <string name="accessibility_service_description">银月 Agent 通过无障碍服务读取屏幕元素，并代为执行点击、滑动与文本输入操作。</string>
+    <string name="accessibility_service_summary">读取界面元素并代执行手势操作</string>
+    <string name="channel_agent">Agent 运行状态</string>
+    <string name="channel_agent_description">Agent 后台运行时显示常驻通知</string>
+</resources>

@@ -1,0 +1,68 @@
+package com.yinyue.mobile.tools
+
+import com.yinyue.mobile.agent.ToolExecutionLimits
+import com.yinyue.mobile.agent.YinyueTool
+import com.yinyue.mobile.agent.schemaOf
+import com.yinyue.mobile.agent.stringParam
+import com.google.gson.JsonObject
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+/**
+ * 通过 Chaquopy 在手机上执行 Python 代码。
+ * 标准输出会捕获，5 秒超时。
+ */
+class PythonExecTool : YinyueTool {
+    override val name = "python_exec"
+    override val description = "在手机本地执行 Python 代码（已预装 json/base64/re/hashlib/time/os/urllib/pathlib/math），5秒超时"
+    override val dangerous = true
+    override val parameters = schemaOf(
+        "code" to stringParam("要执行的 Python 代码"),
+        required = listOf("code"),
+    )
+
+    private val singleThreadExecutor = Executors.newSingleThreadExecutor()
+
+    override suspend fun execute(args: JsonObject): String = withContext(Dispatchers.IO) {
+        val code = args.get("code")?.asString ?: return@withContext "缺少 code 参数"
+        // 用独立线程 + Future 超时，避免 withTimeout 对 Chaquopy 阻塞调用无效
+        val future = CompletableFuture.supplyAsync({ runPython(code) }, singleThreadExecutor)
+        try {
+            future.get(ToolExecutionLimits.PYTHON_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        } catch (e: TimeoutException) {
+            future.cancel(true) // 尝试中断（Chaquopy 可能不响应，但至少释放 IO 线程）
+            "Python 执行超时（${ToolExecutionLimits.PYTHON_TIMEOUT_SECONDS}秒）"
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            "Python 执行错误: ${e.message}"
+        }
+    }
+
+    /** 同步执行 Python 代码并返回 stdout 输出 */
+    private fun runPython(code: String): String {
+        val py = com.chaquo.python.Python.getInstance()
+        val io = py.getModule("io")
+        val sys = py.getModule("sys")
+        val out = io.callAttr("StringIO")
+        val oldStdout = sys["stdout"]
+        sys["stdout"] = out
+        try {
+            py.getModule("builtins").callAttr("exec", code)
+            val outVal = out.callAttr("getvalue").toString()
+            val result = if (outVal.isNotEmpty()) outVal.trimEnd() else ""
+            return if (result.isNotEmpty()) result else "(执行完成，无输出)"
+        } finally {
+            // 判空后再还原，避免写回 null
+            if (oldStdout != null) sys["stdout"] = oldStdout
+        }
+    }
+
+    override suspend fun mock(args: JsonObject): String {
+        val code = args.get("code")?.asString?.take(80) ?: ""
+        return "模拟执行 Python: $code..."
+    }
+}

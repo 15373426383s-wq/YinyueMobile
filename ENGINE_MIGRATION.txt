@@ -1,0 +1,20 @@
+// 银月本地 LLM 推理引擎选择
+// - LlamaNative:  llama.cpp 后端（保留兼容）
+// - MnnNative:     MNN + OpenCL 后端（主力，天玑 APU 加速）
+//
+// 切换引擎：在 AgentLoop / LLMClient 里改 import 和构造即可。
+
+// ── 例: 用 MNN 引擎启动 ──
+// val configJson = File(filesDir, "mnn_config.json")
+// val engine = MnnEngine(configJson.absolutePath)
+// engine.load()
+//
+// // 流式对话
+// engine.chatFlow(
+//     roles = arrayOf("system", "user"),
+//     contents = arrayOf(sysPrompt, userInput),
+//     maxTokens = 256
+// ).collect { token -> appendToChat(token) }
+//
+// // 阻塞式（兼容旧 agent 循环）
+// val reply = engine.chat(roles, contents, maxTokens = 256)
