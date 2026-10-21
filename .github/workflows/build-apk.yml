@@ -10,9 +10,16 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/android/sdk/ndk 2>/dev/null || true
+          df -h /
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -20,22 +27,44 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          accept-android-sdk-licenses: true
-
-      - name: Install SDK packages (platform / build-tools / NDK / CMake)
+      - name: Install NDK / CMake / SDK packages
         run: |
+          set -e
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          which sdkmanager || ls -la "$ANDROID_HOME"
+
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager --install \
             "platforms;android-34" \
             "build-tools;34.0.0" \
             "platform-tools" \
             "ndk;27.0.12077973" \
             "cmake;3.22.1"
-          echo "ANDROID_HOME = $ANDROID_HOME"
-          ls "$ANDROID_HOME/ndk"
+
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          ls "$ANDROID_HOME/ndk"
+          df -h /
+
+      - name: Fix Gradle wrapper + mirrors for overseas runner
+        run: |
+          set -e
+          sed -i 's|^distributionUrl=.*$|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip|' gradle/wrapper/gradle-wrapper.properties
+          sed -i '/mirrors.cloud.tencent.com/d; /maven.aliyun.com/d' settings.gradle.kts
+          sed -i 's/compileSdk = 34/compileSdk = 34\n    ndkVersion = "27.0.12077973"/' app/build.gradle.kts
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+          echo "=== gradle-wrapper.properties ==="
+          cat gradle/wrapper/gradle-wrapper.properties
+          echo "=== settings.gradle.kts ==="
+          cat settings.gradle.kts
+          echo "=== ndkVersion in app/build.gradle.kts ==="
+          grep -n "ndkVersion" app/build.gradle.kts
 
       - name: Build MNN .so (arm64-v8a)
         run: |
@@ -69,14 +98,24 @@ jobs:
             -DMNN_ARM82=ON \
             -DMNN_LLM_BUILD_DEMO=OFF
 
+          echo "=== building MNN ==="
           cmake --build "$BUILD_DIR" --config Release --target MNN -j4
-          cmake --build "$BUILD_DIR" --config Release --target llm  -j4
 
-          find "$BUILD_DIR" -name 'libMNN.so'    | head -1 | xargs -I{} cp {} "$JNILIBS/libMNN.so"
-          find "$BUILD_DIR" -name 'libllm.so'     | head -1 | xargs -I{} cp {} "$JNILIBS/libllm.so"
-          find "$BUILD_DIR" -name 'libMNN_CL.so'  | head -1 | xargs -I{} cp {} "$JNILIBS/libMNN_CL.so"
-          cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$JNILIBS/"
-          echo "=== MNN jniLibs ===" && ls -la "$JNILIBS"
+          echo "=== building llm engine ==="
+          cmake --build "$BUILD_DIR" --config Release --target llm -j4 \
+            || cmake --build "$BUILD_DIR" --config Release --target llm -j1
+
+          for lib in libMNN.so libllm.so libMNN_CL.so; do
+            src=$(find "$BUILD_DIR" -name "$lib" -type f | head -1)
+            if [ -z "$src" ]; then echo "MISSING $lib"; exit 1; fi
+            cp "$src" "$JNILIBS/$lib"
+            echo "copied $lib <- $src"
+          done
+
+          NDK_PREBUILT=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+          cp "$NDK_PREBUILT/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$JNILIBS/"
+          echo "=== jniLibs after MNN ===" && ls -la "$JNILIBS"
+          df -h /
 
       - name: Build llama.cpp .so (arm64-v8a)
         run: |
@@ -104,21 +143,36 @@ jobs:
             -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_SERVER=OFF
 
-          cmake --build "$BUILD_DIR" --config Release --target ggml ggml-base ggml-cpu llama mtmd -j4
-          cp "$BUILD_DIR"/bin/*.so "$JNILIBS"/
-          echo "=== all jniLibs ===" && ls -la "$JNILIBS"
+          cmake --build "$BUILD_DIR" --config Release \
+            --target ggml-base ggml-cpu ggml llama mtmd -j4 \
+            || cmake --build "$BUILD_DIR" --config Release \
+            --target ggml-base ggml-cpu ggml llama mtmd -j1
+
+          for lib in libggml.so libggml-base.so libggml-cpu.so libllama.so libmtmd.so; do
+            src=$(find "$BUILD_DIR" -name "$lib" -type f | head -1)
+            if [ -z "$src" ]; then echo "MISSING $lib"; exit 1; fi
+            cp "$src" "$JNILIBS/$lib"
+            echo "copied $lib <- $src"
+          done
+
+          echo "=== jniLibs after llama.cpp ===" && ls -la "$JNILIBS"
+          df -h /
 
       - name: Assemble Debug APK
         run: |
           set -e
           cd "$GITHUB_WORKSPACE"
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          ./gradlew assembleDebug --no-daemon --stacktrace \
+            -Dorg.gradle.internal.http.socketTimeout=180000 \
+            -Dorg.gradle.internal.http.connectionTimeout=180000
         env:
           GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g"
 
       - name: Upload APK artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: yinyue-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
