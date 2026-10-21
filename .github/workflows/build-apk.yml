@@ -51,20 +51,27 @@ jobs:
           ls "$ANDROID_HOME/ndk"
           df -h /
 
-      - name: Fix Gradle wrapper + mirrors for overseas runner
+      - name: Fix mirrors + ndkVersion for overseas runner
         run: |
           set -e
-          sed -i 's|^distributionUrl=.*$|distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip|' gradle/wrapper/gradle-wrapper.properties
+          # 注意：仓库没有 gradlew / gradle-wrapper.jar，所以不依赖 wrapper，直接装 Gradle（见下一步）
           sed -i '/mirrors.cloud.tencent.com/d; /maven.aliyun.com/d' settings.gradle.kts
           sed -i 's/compileSdk = 34/compileSdk = 34\n    ndkVersion = "27.0.12077973"/' app/build.gradle.kts
           echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-          echo "=== gradle-wrapper.properties ==="
-          cat gradle/wrapper/gradle-wrapper.properties
           echo "=== settings.gradle.kts ==="
           cat settings.gradle.kts
           echo "=== ndkVersion in app/build.gradle.kts ==="
           grep -n "ndkVersion" app/build.gradle.kts
+
+      - name: Set up Gradle 8.7 (repo has no gradlew wrapper)
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          unzip -q gradle.zip -d /opt
+          echo "/opt/gradle-8.7/bin" >> "$GITHUB_PATH"
+          /opt/gradle-8.7/bin/gradle --version
 
       - name: Build MNN .so (arm64-v8a)
         run: |
@@ -135,6 +142,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-26 \
+            -DANDROID_STL=c++_shared \
             -DCMAKE_BUILD_TYPE=Release \
             -DGGML_OPENMP=OFF \
             -DGGML_OPENCL=OFF \
@@ -167,10 +175,11 @@ jobs:
         run: |
           set -e
           cd "$GITHUB_WORKSPACE"
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace \
+          gradle assembleDebug --no-daemon --stacktrace \
             -Dorg.gradle.internal.http.socketTimeout=180000 \
-            -Dorg.gradle.internal.http.connectionTimeout=180000
+            -Dorg.gradle.internal.http.connectionTimeout=180000 \
+            > /tmp/gradle.log 2>&1 \
+            || { echo "=== GRADLE FAILED (tail) ==="; tail -n 120 /tmp/gradle.log; exit 1; }
         env:
           GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g"
 
@@ -183,6 +192,7 @@ jobs:
             /tmp/mnn_cfg.log
             /tmp/mnn_build.log
             /tmp/llama_build.log
+            /tmp/gradle.log
           if-no-files-found: ignore
 
       - name: Upload APK artifact
