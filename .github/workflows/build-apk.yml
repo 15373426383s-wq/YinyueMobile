@@ -10,8 +10,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,10 +20,10 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Android SDK + accept licenses
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          log-accepted-android-sdk-licenses: true
+          accept-android-sdk-licenses: true
 
       - name: Install SDK packages (platform / build-tools / NDK / CMake)
         run: |
@@ -36,7 +34,8 @@ jobs:
             "ndk;27.0.12077973" \
             "cmake;3.22.1"
           echo "ANDROID_HOME = $ANDROID_HOME"
-          echo "NDK         = $ANDROID_NDK_HOME"
+          ls "$ANDROID_HOME/ndk"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - name: Build MNN .so (arm64-v8a)
         run: |
