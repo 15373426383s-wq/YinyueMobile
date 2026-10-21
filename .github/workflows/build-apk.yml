@@ -54,7 +54,6 @@ jobs:
       - name: Fix mirrors + ndkVersion for overseas runner
         run: |
           set -e
-          # 注意：仓库没有 gradlew / gradle-wrapper.jar，所以不依赖 wrapper，直接装 Gradle（见下一步）
           sed -i '/mirrors.cloud.tencent.com/d; /maven.aliyun.com/d' settings.gradle.kts
           sed -i 's/compileSdk = 34/compileSdk = 34\n    ndkVersion = "27.0.12077973"/' app/build.gradle.kts
           echo "sdk.dir=$ANDROID_HOME" > local.properties
@@ -72,6 +71,79 @@ jobs:
           unzip -q gradle.zip -d /opt
           echo "/opt/gradle-8.7/bin" >> "$GITHUB_PATH"
           /opt/gradle-8.7/bin/gradle --version
+
+      - name: Patch app for no-root model loading
+        run: |
+          set -e
+          cat > /tmp/patch_app.py <<'PYEOF'
+          #!/usr/bin/env python3
+          # -*- coding: utf-8 -*-
+          """YinyueMobile 免 root 模型部署补丁：默认后端 llama + 模型目录改公开目录。"""
+          import pathlib, sys
+          ROOT = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(".")
+          F = {
+              "settings": ROOT/"app/src/main/java/com/yinyue/mobile/data/SettingsStore.kt",
+              "modelmgr": ROOT/"app/src/main/java/com/yinyue/mobile/agent/ModelManager.kt",
+              "manifest": ROOT/"app/src/main/AndroidManifest.xml",
+              "main": ROOT/"app/src/main/java/com/yinyue/mobile/ui/MainActivity.kt",
+          }
+          done, skip = [], []
+          def patch(key, old, new, desc):
+              p = F[key]; t = p.read_text(encoding="utf-8")
+              if new in t:
+                  skip.append(desc); return
+              if old not in t:
+                  raise SystemExit("[FAIL] %s: 目标文本未找到" % desc)
+              p.write_text(t.replace(old, new, 1), encoding="utf-8"); done.append(desc)
+
+          patch("settings",
+              'get() = prefs.getString(KEY_LOCAL_BACKEND, "mnn") ?: "mnn"',
+              'get() = prefs.getString(KEY_LOCAL_BACKEND, "llama") ?: "llama"',
+              "a) 默认后端 mnn -> llama")
+
+          patch("modelmgr",
+              '    fun modelDir(): File =\n        File(context.filesDir, "models").also { it.mkdirs() }\n\n    /** MNN 模型目录（与 llama 模型分离） */\n    fun mnnModelDir(): File =\n        File(context.filesDir, "mnn_models").also { it.mkdirs() }\n',
+              '    /**\n     * 免 root 部署：模型放到公开目录 /sdcard/YinyueModels，\n     * 文件管理器 / Termux 均可直接写入。\n     */\n    private val publicDir: File\n        get() = File(android.os.Environment.getExternalStorageDirectory(), "YinyueModels")\n\n    fun modelDir(): File =\n        publicDir.also { it.mkdirs() }\n\n    /** MNN 模型目录（与 llama 模型分离，现同用公开目录） */\n    fun mnnModelDir(): File =\n        publicDir\n',
+              "b) 模型目录 -> /sdcard/YinyueModels")
+
+          patch("modelmgr",
+              '        get() = downloadedModelName == currentModel.name &&\n            ggufFile().exists() &&',
+              '        get() = ggufFile().exists() &&',
+              "c) isModelReady 去掉模型名匹配")
+
+          patch("modelmgr",
+              "var currentModel: ModelInfo = QWEN25_3B",
+              "var currentModel: ModelInfo = QWEN3_4B",
+              "d) 默认模型 -> Qwen3-4B")
+
+          patch("manifest",
+              '    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />',
+              '    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />',
+              "e1) Manifest 增加 MANAGE_EXTERNAL_STORAGE")
+
+          patch("main",
+              '    var useLocal by remember { mutableStateOf(settings.useLocalModel) }\n',
+              '    var useLocal by remember { mutableStateOf(settings.useLocalModel) }\n\n    // 免 root 部署：开启本地模型时申请「所有文件访问权限」\n    val allFilesAccessLauncher = rememberLauncherForActivityResult(\n        ActivityResultContracts.StartActivityForResult()\n    ) { }\n    androidx.compose.runtime.LaunchedEffect(useLocal) {\n        if (useLocal && !android.os.Environment.isExternalStorageManager()) {\n            runCatching {\n                allFilesAccessLauncher.launch(\n                    Intent(\n                        Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION,\n                        android.net.Uri.parse("package:" + context.packageName)\n                    )\n                )\n            }\n        }\n    }\n',
+              "e2) MainActivity 申请所有文件访问权限")
+
+          print("applied=%d skipped=%d" % (len(done), len(skip)))
+          for d in done: print("  +", d)
+          for d in skip: print("  =", d)
+
+          # 校验改动确实生效
+          st = F["settings"].read_text(encoding="utf-8")
+          mm = F["modelmgr"].read_text(encoding="utf-8")
+          assert '"llama") ?: "llama"' in st, "后端默认值未生效"
+          assert "publicDir" in mm and "getExternalStorageDirectory" in mm, "公开目录未生效"
+          assert "QWEN3_4B" in mm.split("var currentModel")[1].split("\n")[0], "默认模型未生效"
+          PYEOF
+          python3 /tmp/patch_app.py "$GITHUB_WORKSPACE"
+          echo "=== 校验：modelDir / ggufFile ==="
+          grep -n "publicDir\|getExternalStorageDirectory" \
+            app/src/main/java/com/yinyue/mobile/agent/ModelManager.kt
+          echo "=== 校验：默认后端 ==="
+          grep -n 'KEY_LOCAL_BACKEND, "llama"' \
+            app/src/main/java/com/yinyue/mobile/data/SettingsStore.kt
 
       - name: Build MNN .so (arm64-v8a)
         run: |
