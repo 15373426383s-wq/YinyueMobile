@@ -96,14 +96,18 @@ jobs:
             -DBUILD_SHARED_LIBS=ON \
             -DMNN_BUILD_SHARED_LIBS=ON \
             -DMNN_ARM82=ON \
-            -DMNN_LLM_BUILD_DEMO=OFF
+            -DMNN_LLM_BUILD_DEMO=OFF \
+            -DMNN_BUILD_LLM=ON > /tmp/mnn_cfg.log 2>&1 \
+            || { echo "=== MNN CONFIGURE FAILED ==="; tail -n 60 /tmp/mnn_cfg.log; exit 1; }
 
-          echo "=== building MNN ==="
-          cmake --build "$BUILD_DIR" --config Release --target MNN -j4
+          echo "=== building MNN core ==="
+          cmake --build "$BUILD_DIR" --config Release --target MNN -j4 > /tmp/mnn_build.log 2>&1 \
+            || { echo "=== MNN BUILD FAILED (tail) ==="; tail -n 80 /tmp/mnn_build.log; exit 1; }
 
           echo "=== building llm engine ==="
-          cmake --build "$BUILD_DIR" --config Release --target llm -j4 \
-            || cmake --build "$BUILD_DIR" --config Release --target llm -j1
+          cmake --build "$BUILD_DIR" --config Release --target llm -j4 >> /tmp/mnn_build.log 2>&1 \
+            || cmake --build "$BUILD_DIR" --config Release --target llm -j1 >> /tmp/mnn_build.log 2>&1 \
+            || { echo "=== LLM BUILD FAILED (tail) ==="; tail -n 80 /tmp/mnn_build.log; exit 1; }
 
           for lib in libMNN.so libllm.so libMNN_CL.so; do
             src=$(find "$BUILD_DIR" -name "$lib" -type f | head -1)
@@ -144,9 +148,10 @@ jobs:
             -DLLAMA_BUILD_SERVER=OFF
 
           cmake --build "$BUILD_DIR" --config Release \
-            --target ggml-base ggml-cpu ggml llama mtmd -j4 \
+            --target ggml-base ggml-cpu ggml llama mtmd -j4 > /tmp/llama_build.log 2>&1 \
             || cmake --build "$BUILD_DIR" --config Release \
-            --target ggml-base ggml-cpu ggml llama mtmd -j1
+            --target ggml-base ggml-cpu ggml llama mtmd -j1 >> /tmp/llama_build.log 2>&1 \
+            || { echo "=== LLAMA BUILD FAILED (tail) ==="; tail -n 80 /tmp/llama_build.log; exit 1; }
 
           for lib in libggml.so libggml-base.so libggml-cpu.so libllama.so libmtmd.so; do
             src=$(find "$BUILD_DIR" -name "$lib" -type f | head -1)
@@ -168,6 +173,17 @@ jobs:
             -Dorg.gradle.internal.http.connectionTimeout=180000
         env:
           GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g"
+
+      - name: Upload build logs (for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            /tmp/mnn_cfg.log
+            /tmp/mnn_build.log
+            /tmp/llama_build.log
+          if-no-files-found: ignore
 
       - name: Upload APK artifact
         if: always()
